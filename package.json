@@ -1,0 +1,30 @@
+{
+  "name": "zomato-ai-demo",
+  "version": "1.0.0",
+  "description": "Zomato-like AI Food Delivery Application powered by Naagmani v2 Enterprise AI OS",
+  "type": "module",
+  "main": "dist/server/app.js",
+  "scripts": {
+    "dev": "tsx src/server/app.ts",
+    "build": "tsc && node -e \"import('fs').then(fs => fs.cpSync('src/client', 'dist/client', {recursive: true}))\"",
+    "start": "node dist/server/app.js",
+    "test": "tsx --test tests/e2e/*.test.ts",
+    "demo:register": "tsx scripts/quick-register.ts",
+    "demo:onboarding": "tsx scripts/onboarding.ts",
+    "demo:init": "tsx scripts/onboarding.ts",
+    "demo:reset": "tsx scripts/reset-demo.ts",
+    "demo:check": "tsx scripts/check-naagmani.ts"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.9",
+    "tsx": "^4.15.7",
+    "typescript": "^5.5.2"
+  }
+}
