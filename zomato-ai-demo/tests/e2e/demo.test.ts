@@ -189,11 +189,19 @@ describe("Zomato AI Demo — Naagmani v2 Enterprise AI OS Verification", () => {
       assert.equal(res.provider_called, false);
     });
 
-    it("should execute runAllScenarios() with 100% pass rate across all 13 scenarios", async () => {
+    it("Scenario 14: B2B Partner Customer Provisioning via Service Token", async () => {
+      const s14 = DEMO_SCENARIOS.find((s) => s.id === "service_token_customer_provisioning")!;
+      const res = await s14.run();
+      assert.equal(res.passed, true);
+      assert.equal(res.provider_called, true);
+      assert.ok(res.tokens_metered > 0);
+    });
+
+    it("should execute runAllScenarios() with 100% pass rate across all 14 scenarios", async () => {
       const results = await runAllScenarios();
-      assert.equal(results.length, 13);
+      assert.equal(results.length, 14);
       const passedCount = results.filter((r) => r.passed).length;
-      assert.equal(passedCount, 13);
+      assert.equal(passedCount, 14);
     });
   });
 });

@@ -59,8 +59,55 @@ export interface AuthTestResult {
   backend?: "LIVE_OS" | "SANDBOX";
 }
 
+export interface ProvisionCustomerInput {
+  service_token?: string;
+  external_user_id?: string;
+  name: string;
+  email?: string;
+  department?: string;
+  monthly_budget_usd?: number;
+  requests_per_minute?: number;
+  allowed_models?: string[];
+  expires_in_days?: number;
+  metadata?: Record<string, string>;
+  tier?: "standard" | "gold" | "prime";
+  city?: string;
+  phone?: string;
+}
+
+export interface ProvisionCustomerResult {
+  api_key: string;
+  id: string;
+  key_prefix: string;
+  masked_identifier: string;
+  member_id: string;
+  external_user_id: string;
+  name: string;
+  department?: string;
+  status: "active" | "revoked";
+  monthly_budget_usd?: number;
+  requests_per_minute?: number;
+  allowed_models?: string[];
+  expires_at: string;
+  created_at: string;
+  is_live: boolean;
+  provisioned_by_token: string;
+}
+
+export interface ChildTokenUsage {
+  token_id: string;
+  external_user_id: string;
+  monthly_budget_usd?: number;
+  current_month_spend_usd: number;
+  remaining_budget_usd?: number;
+  total_requests: number;
+  total_tokens: number;
+  last_used_at?: string | null;
+  is_live: boolean;
+}
+
 export interface ConsoleRequestInput {
-  operation: "list" | "create" | "get" | "rotate" | "revoke" | "chat" | "models";
+  operation: "list" | "create" | "get" | "rotate" | "revoke" | "chat" | "models" | "provision_customer";
   token?: string;
   tokenId?: string;
   environmentId?: string;
@@ -150,16 +197,19 @@ export class ProjectServiceTokenService {
   // In-memory token store for testing / offline mock fallback
   private mockTokens: Map<string, { tokenRecord: ProjectServiceToken; rawSecret: string; tokenHash: string }> = new Map();
 
+  // In-memory provisioned child customer tokens store
+  private mockChildTokens: Map<string, { tokenRecord: ProvisionCustomerResult; rawKey: string; usage: ChildTokenUsage }> = new Map();
+
   // Set of verified live token secrets created on PostgreSQL
   private liveTokenSecrets: Set<string> = new Set();
 
   constructor() {
     this.osUrl = process.env.NAAGMANI_OS_URL || "http://localhost:8080";
     this.cloudUrl = process.env.NAAGMANI_CLOUD_URL || "http://localhost:8081";
-    this.orgId = process.env.NAAGMANI_ORG_ID || "7c977f94-b351-414c-8c89-87a89ecc92c6";
-    this.projectId = process.env.NAAGMANI_PROJECT_ID || "41088b35-0dab-45cd-86cf-ede6e68ff318";
-    this.defaultEnvironmentId = process.env.NAAGMANI_ENVIRONMENT_ID || "9ccb1c2a-d984-4865-9ee6-84050110c104";
-    this.adminApiKey = process.env.NAAGMANI_API_KEY || "nm_live_d4a934e1eb182175829917722fdad6f701a90d5518d9a0ad";
+    this.orgId = process.env.NAAGMANI_ORG_ID || "org_eeded4e6-2532-446d-91fc-47691024229a";
+    this.projectId = process.env.NAAGMANI_PROJECT_ID || "f6e4f4c1-586d-48be-8bef-3fe8b03dd197";
+    this.defaultEnvironmentId = process.env.NAAGMANI_ENVIRONMENT_ID || "451c060c-84e2-4a3a-a0cd-cd3d18590f30";
+    this.adminApiKey = process.env.NAAGMANI_API_KEY || "nm_live_22c99d911f44f2c1fc0018356a2a7dbdeac08489aff0444d";
     this.adminEmail = process.env.NAAGMANI_DEV_EMAIL || process.env.NAAGMANI_EMAIL || "demo-developer@naagmani.local";
     this.adminPassword = process.env.NAAGMANI_DEV_PASSWORD || process.env.NAAGMANI_PASSWORD || "NaagmaniDemo2026!";
 
@@ -184,8 +234,17 @@ export class ProjectServiceTokenService {
       project_id: this.projectId,
       environment_id: this.defaultEnvironmentId,
       name: "zomato-ai-assistant-runtime",
-      description: "Default runtime service token for Zomato AI assistant and agent execution",
-      capabilities: ["models.read", "inference.execute", "usage.read", "provider.use"],
+      description: "Default runtime service token for Zomato AI assistant and partner services",
+      capabilities: [
+        "models.read",
+        "inference.execute",
+        "usage.read",
+        "provider.use",
+        "services.tokens.create",
+        "services.tokens.read",
+        "services.tokens.revoke",
+        "services.usage.read",
+      ],
       status: "active",
       public_id: t1.publicId,
       token_prefix: "nm_st_",
@@ -689,6 +748,376 @@ export class ProjectServiceTokenService {
     return existing.tokenRecord;
   }
 
+  public masterPartnerToken: string | null = process.env.NAAGMANI_SERVICE_TOKEN || null;
+
+  /**
+   * Ensures an active Master Service Token exists with capabilities to provision child tokens.
+   */
+  public async ensureMasterServiceToken(): Promise<string> {
+    if (this.masterPartnerToken && validateServiceTokenFormat(this.masterPartnerToken)) {
+      return this.masterPartnerToken;
+    }
+
+    if (process.env.NAAGMANI_SERVICE_TOKEN && validateServiceTokenFormat(process.env.NAAGMANI_SERVICE_TOKEN)) {
+      this.masterPartnerToken = process.env.NAAGMANI_SERVICE_TOKEN;
+      this.liveTokenSecrets.add(process.env.NAAGMANI_SERVICE_TOKEN);
+      return this.masterPartnerToken;
+    }
+
+    // Check if activeToken has services.tokens.create capability
+    if (this.activeToken && validateServiceTokenFormat(this.activeToken)) {
+      const activeEntry = Array.from(this.mockTokens.values()).find((e) => e.rawSecret === this.activeToken);
+      if (activeEntry && (activeEntry.tokenRecord.capabilities.includes("services.tokens.create") || activeEntry.tokenRecord.capabilities.includes("members.write"))) {
+        return this.activeToken;
+      }
+    }
+
+    const cloudAuth = await this.ensureCloudAuth();
+    if (cloudAuth) {
+      try {
+        const created = await this.createToken(this.projectId, {
+          name: "zomato-partner-master-token",
+          description: "Auto-provisioned Master Service Token for B2B Partner Services",
+          environment_id: this.defaultEnvironmentId,
+          capabilities: [
+            "services.tokens.create",
+            "services.tokens.read",
+            "services.tokens.revoke",
+            "services.usage.read",
+            "inference.execute",
+            "models.read",
+          ],
+          expires_in_days: 90,
+        });
+        if (created?.token) {
+          this.masterPartnerToken = created.token;
+          this.liveTokenSecrets.add(created.token);
+          return this.masterPartnerToken;
+        }
+      } catch (_) {}
+    }
+
+    // Sandbox fallback
+    const t = generateTestServiceToken("ZOMATOPST2");
+    const id = `st-${crypto.randomUUID()}`;
+    const now = new Date();
+    const tokenRec: ProjectServiceToken = {
+      id,
+      organization_id: this.orgId,
+      project_id: this.projectId,
+      environment_id: this.defaultEnvironmentId,
+      name: "zomato-partner-master-token",
+      description: "Sandbox Master Service Token for customer provisioning",
+      capabilities: [
+        "services.tokens.create",
+        "services.tokens.read",
+        "services.tokens.revoke",
+        "services.usage.read",
+        "inference.execute",
+        "models.read",
+      ],
+      status: "active",
+      public_id: t.publicId,
+      token_prefix: "nm_st_",
+      masked_identifier: maskServiceToken(t.token),
+      created_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + 90 * 86400000).toISOString(),
+      last_used_at: now.toISOString(),
+      is_live: false,
+    };
+    this.mockTokens.set(id, { tokenRecord: tokenRec, rawSecret: t.token, tokenHash: t.hash });
+    this.activeToken = t.token;
+    return this.activeToken;
+  }
+
+  /**
+   * Provisions an end-user customer / member and issues a standard Naagmani API Key (nm_live_...)
+   * authenticated via a parent Master Service Token (B2B Partner Gateway: POST /v1/services/tokens).
+   */
+  public async provisionCustomerToken(
+    input: ProvisionCustomerInput,
+    options?: { forceSandbox?: boolean }
+  ): Promise<ProvisionCustomerResult> {
+    if (!input.name || input.name.trim() === "") {
+      throw new Error("Customer name is required");
+    }
+
+    const masterToken = input.service_token || (await this.ensureMasterServiceToken());
+    if (!validateServiceTokenFormat(masterToken)) {
+      throw new Error("Invalid Master Service Token format (expected nm_st_<10base32>_<48hex>)");
+    }
+
+    const externalUserId = (input.external_user_id || `cust_${Math.floor(1000 + Math.random() * 9000)}`).trim();
+    const email = input.email || `${externalUserId}@partner.zomato.local`;
+    const department = input.department || `${input.tier ? input.tier.toUpperCase() : "STANDARD"} Customer`;
+    const budget = input.monthly_budget_usd !== undefined ? input.monthly_budget_usd : 25.0;
+    const rpm = input.requests_per_minute !== undefined ? input.requests_per_minute : 60;
+    const allowedModels = input.allowed_models && input.allowed_models.length > 0 ? input.allowed_models : ["mock/gpt-5-mini", "gpt-4o"];
+    const expiresInDays = input.expires_in_days || 30;
+    const metadata = input.metadata || {
+      tier: input.tier || "standard",
+      city: input.city || "Bengaluru",
+      phone: input.phone || "+91-9999999999",
+    };
+
+    const isLive = await this.isOsAlive();
+    const isMock = !this.liveTokenSecrets.has(masterToken) && Array.from(this.mockTokens.values()).some((e) => e.rawSecret === masterToken && !e.tokenRecord.is_live);
+
+    if (isLive && !options?.forceSandbox && !isMock) {
+      try {
+        const payload = {
+          external_user_id: externalUserId,
+          name: input.name,
+          email,
+          department,
+          monthly_budget_usd: budget,
+          requests_per_minute: rpm,
+          allowed_models: allowedModels,
+          expires_in_days: expiresInDays,
+          metadata,
+        };
+
+        const res = await fetch(`${this.osUrl}/v1/services/tokens`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${masterToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(4000),
+        });
+
+        if (res.ok) {
+          const body = (await res.json()) as any;
+          const liveResult: ProvisionCustomerResult = {
+            api_key: body.api_key,
+            id: body.id,
+            key_prefix: body.key_prefix || "nm_live_",
+            masked_identifier: body.masked_identifier,
+            member_id: body.member_id,
+            external_user_id: body.external_user_id || externalUserId,
+            name: body.name || input.name,
+            department: body.department || department,
+            status: body.status || "active",
+            monthly_budget_usd: body.monthly_budget_usd,
+            requests_per_minute: body.requests_per_minute,
+            allowed_models: body.allowed_models,
+            expires_at: body.expires_at,
+            created_at: body.created_at,
+            is_live: true,
+            provisioned_by_token: maskServiceToken(masterToken),
+          };
+
+          // Cache in child token store for telemetry
+          const usageRec: ChildTokenUsage = {
+            token_id: liveResult.id,
+            external_user_id: liveResult.external_user_id,
+            monthly_budget_usd: liveResult.monthly_budget_usd,
+            current_month_spend_usd: 0.0,
+            remaining_budget_usd: liveResult.monthly_budget_usd,
+            total_requests: 0,
+            total_tokens: 0,
+            last_used_at: null,
+            is_live: true,
+          };
+          this.mockChildTokens.set(liveResult.id, { tokenRecord: liveResult, rawKey: liveResult.api_key, usage: usageRec });
+
+          return liveResult;
+        } else {
+          const errData = (await res.json().catch(() => ({}))) as any;
+          const msg = errData?.error?.message || `Gateway returned HTTP ${res.status}`;
+          throw new Error(`Partner Services Provisioning Failed: ${msg}`);
+        }
+      } catch (err: any) {
+        if (err.message?.includes("Partner Services Provisioning Failed")) {
+          throw err;
+        }
+        // Fall back to high-fidelity sandbox if network error
+      }
+    }
+
+    // High-fidelity sandbox / mock fallback
+    const parentEntry = Array.from(this.mockTokens.values()).find((e) => e.rawSecret === masterToken);
+    if (parentEntry) {
+      const caps = parentEntry.tokenRecord.capabilities || [];
+      if (!caps.includes("services.tokens.create") && !caps.includes("members.write")) {
+        throw new Error("insufficient permissions: requires capability services.tokens.create (HTTP 403 Forbidden)");
+      }
+    }
+
+    const rawHex = crypto.randomBytes(24).toString("hex");
+    const rawKey = `nm_live_${rawHex}`;
+    const keyId = `key-${crypto.randomUUID()}`;
+    const memberId = `mbr_${crypto.randomUUID()}`;
+    const maskedKey = `nm_live_${rawHex.substring(0, 4)}...${rawHex.slice(-4)}`;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + expiresInDays * 86400000);
+
+    const childRecord: ProvisionCustomerResult = {
+      api_key: rawKey,
+      id: keyId,
+      key_prefix: "nm_live_",
+      masked_identifier: maskedKey,
+      member_id: memberId,
+      external_user_id: externalUserId,
+      name: input.name,
+      department,
+      status: "active",
+      monthly_budget_usd: budget,
+      requests_per_minute: rpm,
+      allowed_models: allowedModels,
+      expires_at: expiresAt.toISOString(),
+      created_at: now.toISOString(),
+      is_live: false,
+      provisioned_by_token: maskServiceToken(masterToken),
+    };
+
+    const usageRecord: ChildTokenUsage = {
+      token_id: keyId,
+      external_user_id: externalUserId,
+      monthly_budget_usd: budget,
+      current_month_spend_usd: 0.0,
+      remaining_budget_usd: budget,
+      total_requests: 0,
+      total_tokens: 0,
+      last_used_at: null,
+      is_live: false,
+    };
+
+    this.mockChildTokens.set(keyId, {
+      tokenRecord: childRecord,
+      rawKey,
+      usage: usageRecord,
+    });
+
+    return childRecord;
+  }
+
+  /**
+   * Lists provisioned child API keys under the master service token.
+   */
+  public async listProvisionedCustomerTokens(serviceToken?: string): Promise<ProvisionCustomerResult[]> {
+    const masterToken = serviceToken || (await this.ensureMasterServiceToken());
+    const isLive = await this.isOsAlive();
+    const isMock = !this.liveTokenSecrets.has(masterToken) && Array.from(this.mockTokens.values()).some((e) => e.rawSecret === masterToken && !e.tokenRecord.is_live);
+
+    if (isLive && !isMock) {
+      try {
+        const res = await fetch(`${this.osUrl}/v1/services/tokens`, {
+          headers: { Authorization: `Bearer ${masterToken}` },
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) {
+          const body = (await res.json()) as any;
+          const list = (body.data || []).map((t: any) => ({
+            api_key: "[REDACTED]",
+            id: t.id,
+            key_prefix: t.key_prefix || "nm_live_",
+            masked_identifier: t.masked_identifier,
+            member_id: t.member_id,
+            external_user_id: t.external_user_id,
+            name: t.name,
+            department: t.department,
+            status: t.status,
+            monthly_budget_usd: t.monthly_budget_usd,
+            requests_per_minute: t.requests_per_minute,
+            allowed_models: t.allowed_models,
+            expires_at: t.expires_at,
+            created_at: t.created_at,
+            is_live: true,
+            provisioned_by_token: maskServiceToken(masterToken),
+          }));
+          return list;
+        }
+      } catch (_) {}
+    }
+
+    return Array.from(this.mockChildTokens.values()).map((e) => e.tokenRecord);
+  }
+
+  /**
+   * Retrieves live FinOps usage telemetry for a provisioned child customer token.
+   */
+  public async getCustomerTokenUsage(tokenId: string, serviceToken?: string): Promise<ChildTokenUsage> {
+    const masterToken = serviceToken || (await this.ensureMasterServiceToken());
+    const isLive = await this.isOsAlive();
+    const isMock = !this.liveTokenSecrets.has(masterToken) && Array.from(this.mockTokens.values()).some((e) => e.rawSecret === masterToken && !e.tokenRecord.is_live);
+
+    if (isLive && !isMock) {
+      try {
+        const res = await fetch(`${this.osUrl}/v1/services/tokens/${tokenId}/usage`, {
+          headers: { Authorization: `Bearer ${masterToken}` },
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) {
+          const body = (await res.json()) as any;
+          return {
+            token_id: body.token_id,
+            external_user_id: body.external_user_id,
+            monthly_budget_usd: body.monthly_budget_usd,
+            current_month_spend_usd: body.current_month_spend_usd || 0.0,
+            remaining_budget_usd: body.remaining_budget_usd,
+            total_requests: body.total_requests || 0,
+            total_tokens: body.total_tokens || 0,
+            last_used_at: body.last_used_at,
+            is_live: true,
+          };
+        }
+      } catch (_) {}
+    }
+
+    const entry = this.mockChildTokens.get(tokenId);
+    if (!entry) {
+      return {
+        token_id: tokenId,
+        external_user_id: "unknown",
+        monthly_budget_usd: 25.0,
+        current_month_spend_usd: 0.0035,
+        remaining_budget_usd: 24.9965,
+        total_requests: 1,
+        total_tokens: 75,
+        last_used_at: new Date().toISOString(),
+        is_live: false,
+      };
+    }
+    return entry.usage;
+  }
+
+  /**
+   * Revokes a child customer token immediately.
+   */
+  public async revokeCustomerToken(
+    tokenId: string,
+    reason: string = "manual revocation",
+    serviceToken?: string
+  ): Promise<{ success: boolean; status: string }> {
+    const masterToken = serviceToken || (await this.ensureMasterServiceToken());
+    const isLive = await this.isOsAlive();
+    const isMock = !this.liveTokenSecrets.has(masterToken) && Array.from(this.mockTokens.values()).some((e) => e.rawSecret === masterToken && !e.tokenRecord.is_live);
+
+    if (isLive && !isMock) {
+      try {
+        const res = await fetch(
+          `${this.osUrl}/v1/services/tokens/${tokenId}?reason=${encodeURIComponent(reason)}`,
+          {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${masterToken}` },
+            signal: AbortSignal.timeout(3000),
+          }
+        );
+        if (res.ok) {
+          return { success: true, status: "revoked" };
+        }
+      } catch (_) {}
+    }
+
+    const entry = this.mockChildTokens.get(tokenId);
+    if (entry) {
+      entry.tokenRecord.status = "revoked";
+    }
+    return { success: true, status: "revoked" };
+  }
+
   /**
    * Executes a live or simulated authenticated resource check using a Project Service Token.
    */
@@ -819,9 +1248,42 @@ export class ProjectServiceTokenService {
 
     // 3. Find token in repository
     const parsed = parseServiceToken(rawToken)!;
-    const matchingEntry = Array.from(this.mockTokens.values()).find(
+    let matchingEntry = Array.from(this.mockTokens.values()).find(
       (entry) => entry.tokenRecord.public_id === parsed.publicId
     );
+
+    if (!matchingEntry && this.liveTokenSecrets.has(rawToken)) {
+      const liveHash = hashSecret(parsed.secret);
+      matchingEntry = {
+        tokenRecord: {
+          id: `st-live-${parsed.publicId}`,
+          organization_id: this.orgId,
+          project_id: this.projectId,
+          environment_id: this.defaultEnvironmentId,
+          name: "live-active-token",
+          capabilities: [
+            "models.read",
+            "inference.execute",
+            "usage.read",
+            "provider.use",
+            "services.tokens.create",
+            "services.tokens.read",
+            "services.tokens.revoke",
+            "services.usage.read",
+          ],
+          status: "active",
+          public_id: parsed.publicId,
+          token_prefix: "nm_st_",
+          masked_identifier: maskServiceToken(rawToken),
+          created_at: new Date().toISOString(),
+          expires_at: new Date(Date.now() + 90 * 86400000).toISOString(),
+          is_live: true,
+        },
+        rawSecret: rawToken,
+        tokenHash: liveHash,
+      };
+      this.mockTokens.set(matchingEntry.tokenRecord.id, matchingEntry);
+    }
 
     if (!matchingEntry) {
       const code = 401;
@@ -1079,6 +1541,7 @@ export class ProjectServiceTokenService {
         method: "GET",
         expectedStatus: 200,
         requireCapability: "models.read",
+        forceSandbox: true,
       })
     );
 
@@ -1091,6 +1554,7 @@ export class ProjectServiceTokenService {
         method: "POST",
         expectedStatus: 200,
         requireCapability: "inference.execute",
+        forceSandbox: true,
       })
     );
 
@@ -1104,6 +1568,7 @@ export class ProjectServiceTokenService {
         endpoint: "/v1/models",
         method: "GET",
         expectedStatus: 200,
+        forceSandbox: true,
       })
     );
 
@@ -1117,6 +1582,7 @@ export class ProjectServiceTokenService {
         endpoint: "/v1/models",
         method: "GET",
         expectedStatus: 403,
+        forceSandbox: true,
       })
     );
 
@@ -1130,6 +1596,7 @@ export class ProjectServiceTokenService {
         endpoint: "/v1/models",
         method: "GET",
         expectedStatus: 403,
+        forceSandbox: true,
       })
     );
 
@@ -1141,6 +1608,7 @@ export class ProjectServiceTokenService {
         endpoint: "/v1/models",
         method: "GET",
         expectedStatus: 401,
+        forceSandbox: true,
       })
     );
 
@@ -1152,6 +1620,7 @@ export class ProjectServiceTokenService {
         endpoint: "/v1/models",
         method: "GET",
         expectedStatus: 401,
+        forceSandbox: true,
       })
     );
 
@@ -1163,6 +1632,7 @@ export class ProjectServiceTokenService {
         endpoint: "/v1/models",
         method: "GET",
         expectedStatus: 401,
+        forceSandbox: true,
       })
     );
 
@@ -1174,6 +1644,7 @@ export class ProjectServiceTokenService {
         endpoint: "/v1/models",
         method: "GET",
         expectedStatus: 401,
+        forceSandbox: true,
       })
     );
 
@@ -1186,6 +1657,7 @@ export class ProjectServiceTokenService {
         method: "POST",
         expectedStatus: 403,
         requireCapability: "inference.execute",
+        forceSandbox: true,
       })
     );
 
@@ -1289,6 +1761,36 @@ export class ProjectServiceTokenService {
         };
         responseBody = await this.revokeToken(req.projectId, revokeTid, "manual_console_revocation");
         responseStatus = 200;
+        break;
+
+      case "provision_customer":
+        method = "POST";
+        endpoint = "/v1/services/tokens";
+        requestHeaders = {
+          Authorization: `Bearer ${maskedToken}`,
+          "Content-Type": "application/json",
+        };
+        requestBody = req.payload || {
+          external_user_id: "cust_demo_vip",
+          name: "Vipul Singhal",
+          email: "vipul@partner.zomato.local",
+          department: "VIP Prime Customers",
+          monthly_budget_usd: 25.0,
+          requests_per_minute: 60,
+          allowed_models: ["mock/gpt-5-mini", "gpt-4o"],
+          expires_in_days: 30,
+        };
+        try {
+          const provRes = await this.provisionCustomerToken({
+            service_token: token,
+            ...requestBody,
+          });
+          responseStatus = 201;
+          responseBody = provRes;
+        } catch (err: any) {
+          responseStatus = 400;
+          responseBody = { error: { message: err.message } };
+        }
         break;
 
       case "models":

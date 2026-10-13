@@ -1,7 +1,8 @@
-import { naagmaniClient, AIChatResponse } from "./naagmani-client.js";
-import { executeZomatoTool } from "./tools.js";
-import { retrieveSupportPolicies } from "../knowledge/policies.js";
-import { ORDERS, CUSTOMERS } from "../mock/data.js";
+import { naagmaniClient, AIChatResponse } from "./naagmani-client";
+import { executeZomatoTool } from "./tools";
+import { retrieveSupportPolicies } from "../knowledge/policies";
+import { ORDERS, CUSTOMERS, addCustomer, createWelcomeOrder } from "../mock/data";
+import { projectServiceTokenService } from "./service-tokens";
 
 export interface ScenarioDefinition {
   id: string;
@@ -581,6 +582,85 @@ export const DEMO_SCENARIOS: ScenarioDefinition[] = [
             { name: "Tenant Isolation", status: "DENIED", duration_ms: 2, details: "Cross-customer boundary protection active" },
           ],
         },
+      };
+    },
+  },
+
+  // 14. B2B Partner Customer Provisioning via Service Token
+  {
+    id: "service_token_customer_provisioning",
+    number: 14,
+    name: "B2B Partner Customer Provisioning — Master Service Token Minting & Child Key Budgeting",
+    category: "TENANCY",
+    description: "Partner backend uses Master Service Token to provision a new customer member, issue nm_live_ API key with $25.00/mo budget and 60 RPM, and run authenticated AI inference",
+    sampleInput: "Provision customer 'Ananya Sengupta' with $25/mo budget and test AI assistant",
+    expectedBehavior: "Master Service Token authenticates POST /v1/services/tokens. Minted child key (nm_live_...) with linked member ID (mbr_...) executes AI chat cleanly.",
+    run: async (input) => {
+      const t0 = Date.now();
+      const initialCalls = naagmaniClient.providerCallsTotal;
+
+      // 1. Provision new customer via Service Token
+      const provResult = await projectServiceTokenService.provisionCustomerToken({
+        name: "Ananya Sengupta",
+        email: "ananya.sengupta@example.com",
+        tier: "prime",
+        city: "Bengaluru",
+        phone: "+91-9876543290",
+        monthly_budget_usd: 25.0,
+        requests_per_minute: 60,
+        allowed_models: ["mock/gpt-5-mini", "gpt-4o"],
+      });
+
+      // 2. Register into demo catalog
+      const newCust = addCustomer({
+        id: provResult.external_user_id,
+        name: provResult.name,
+        email: "ananya.sengupta@example.com",
+        phone: "+91-9876543290",
+        city: "Bengaluru",
+        tier: "prime",
+        member_id: provResult.member_id,
+        api_key: provResult.api_key,
+        key_id: provResult.id,
+        masked_identifier: provResult.masked_identifier,
+        monthly_budget_usd: provResult.monthly_budget_usd,
+        requests_per_minute: provResult.requests_per_minute,
+        status: provResult.status,
+      });
+
+      // 3. Create initial order for tracking
+      createWelcomeOrder(newCust);
+
+      // 4. Execute AI Assistant chat using provisioned child key
+      const prevKey = naagmaniClient.getAuthToken();
+      naagmaniClient.setAuthToken(provResult.api_key);
+
+      const response = await naagmaniClient.executeChat({
+        customerId: newCust.id,
+        messages: [{ role: "user", content: input || "Hello! What vegetarian food options do you recommend?" }],
+      });
+
+      // Restore previous runtime token
+      naagmaniClient.setAuthToken(prevKey);
+
+      const providerDelta = naagmaniClient.providerCallsTotal - initialCalls;
+      const passed = provResult.api_key.startsWith("nm_live_") && Boolean(provResult.member_id) && response.success;
+
+      return {
+        scenario_id: "service_token_customer_provisioning",
+        scenario_name: "B2B Partner Customer Provisioning — Master Service Token Minting & Child Key Budgeting",
+        input: `Master Token: ${provResult.provisioned_by_token} ➔ Provisioned User: ${provResult.name} (${provResult.external_user_id}) | Budget: $${provResult.monthly_budget_usd}/mo`,
+        expected: "HTTP 201 Created | Minted child key nm_live_... | Member ID mbr_... | Authenticated AI inference successful",
+        actual: passed
+          ? `SUCCESS: Minted child key ${provResult.masked_identifier} for member ${provResult.member_id}. Chat succeeded with ${response.usage?.total_tokens} tokens metered.`
+          : `FAILED: provResult.api_key=${provResult.api_key}, success=${response.success}`,
+        passed,
+        provider_called: response.provider_called,
+        provider_calls_count_delta: providerDelta,
+        tokens_metered: response.usage?.total_tokens || 0,
+        cost_usd: response.usage?.cost_usd || 0,
+        duration_ms: Date.now() - t0,
+        response,
       };
     },
   },

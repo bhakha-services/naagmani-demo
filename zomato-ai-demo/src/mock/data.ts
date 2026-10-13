@@ -5,6 +5,18 @@ export interface Customer {
   phone: string;
   tier: "standard" | "gold" | "prime";
   city: string;
+  // B2B Partner / Service Token provisioned fields
+  member_id?: string;
+  api_key?: string;
+  key_id?: string;
+  key_prefix?: string;
+  masked_identifier?: string;
+  monthly_budget_usd?: number;
+  requests_per_minute?: number;
+  allowed_models?: string[];
+  status?: "active" | "revoked";
+  provisioned_at?: string;
+  provisioned_by_service_token?: string;
 }
 
 export interface MenuItem {
@@ -712,3 +724,79 @@ export const SUPPORT_POLICIES: SupportPolicy[] = [
     ],
   },
 ];
+
+// ----------------------------------------------------------------------
+// Dynamic Customer & Order Management for Demo and Provisioning
+// ----------------------------------------------------------------------
+const INITIAL_CUSTOMERS_COPY: Customer[] = JSON.parse(JSON.stringify(CUSTOMERS));
+const INITIAL_ORDERS_COPY: Order[] = JSON.parse(JSON.stringify(ORDERS));
+
+export function getAllCustomers(): Customer[] {
+  return CUSTOMERS;
+}
+
+export function getCustomer(id: string): Customer | undefined {
+  return CUSTOMERS.find((c) => c.id === id || c.member_id === id);
+}
+
+export function addCustomer(customer: Customer): Customer {
+  const existingIdx = CUSTOMERS.findIndex((c) => c.id === customer.id);
+  if (existingIdx !== -1) {
+    CUSTOMERS[existingIdx] = { ...CUSTOMERS[existingIdx], ...customer };
+    return CUSTOMERS[existingIdx];
+  }
+  CUSTOMERS.push(customer);
+  return customer;
+}
+
+export function updateCustomer(id: string, updates: Partial<Customer>): Customer | undefined {
+  const customer = CUSTOMERS.find((c) => c.id === id || c.member_id === id);
+  if (!customer) return undefined;
+  Object.assign(customer, updates);
+  return customer;
+}
+
+export function createWelcomeOrder(customer: Customer): Order {
+  const orderNum = 1000 + ORDERS.length + 1;
+  const newOrderId = `ORD-${orderNum}`;
+  const now = new Date();
+  const rest = RESTAURANTS[0];
+
+  const welcomeOrder: Order = {
+    id: newOrderId,
+    customer_id: customer.id,
+    customer_name: customer.name,
+    restaurant_id: rest.id,
+    restaurant_name: rest.name,
+    items: [
+      { name: "Farmhouse Deluxe", quantity: 1, price: 449 },
+      { name: "Garlic Breadsticks", quantity: 1, price: 149 },
+    ],
+    total_amount: 598,
+    status: "OUT_FOR_DELIVERY",
+    eta_minutes: 20,
+    delivery_partner: {
+      name: "Suresh Patil",
+      phone: "+91-9876599112",
+      vehicle_number: "KA-05-AB-7890",
+    },
+    payment_status: "SUCCESS",
+    payment_method: "UPI",
+    created_at: now.toISOString(),
+    updated_at: now.toISOString(),
+    delivery_address: `${customer.city || "Bengaluru"}, Near Central Park`,
+  };
+
+  ORDERS.unshift(welcomeOrder);
+  return welcomeOrder;
+}
+
+export function resetCustomers(): void {
+  CUSTOMERS.length = 0;
+  CUSTOMERS.push(...JSON.parse(JSON.stringify(INITIAL_CUSTOMERS_COPY)));
+}
+
+export function resetOrders(): void {
+  ORDERS.length = 0;
+  ORDERS.push(...JSON.parse(JSON.stringify(INITIAL_ORDERS_COPY)));
+}

@@ -16,7 +16,7 @@ A production-grade, full-stack reference application demonstrating **Naagmani v2
                                        │ HTTP REST / JSON
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                     ZOMATO DEMO BACKEND (Node.js/Express)                   │
+│             ZOMATO DEMO NEXT.JS APP ROUTER (Next.js 16 / React 19)          │
 │   - 5 Customers (Prime, Gold, Standard)  - 10 Bangalore Restaurants         │
 │   - 20 Orders across Delivery States     - 6 Food Delivery MCP Tools        │
 │   - RAG Knowledge Base (Refund, Cancellation, Late Delivery Policies)       │

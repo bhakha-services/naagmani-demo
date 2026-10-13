@@ -11,8 +11,8 @@ import {
 import { naagmaniClient } from "../../src/server/naagmani-client.js";
 
 describe("Zomato AI Demo — Project Service Token Integration & Lifecycle Verification", () => {
-  const testProjectId = "f7cf337c-2c9a-4631-8957-9dbfe602cc17";
-  const testEnvId = "bab66704-4336-4073-b0dc-f3aad8c823ec";
+  const testProjectId = projectServiceTokenService.projectId;
+  const testEnvId = projectServiceTokenService.defaultEnvironmentId;
 
   describe("1. Cryptographic Format, Validation, and Redaction Invariants", () => {
     it("should generate and validate compliant 65-character Project Service Token format (nm_st_<10base32>_<48hex>)", () => {
@@ -343,10 +343,10 @@ describe("Zomato AI Demo — Project Service Token Integration & Lifecycle Verif
       if (cloudAuth) {
         // Create real token via Cloud so live OS accepts it
         const liveRes = await projectServiceTokenService.createToken(
-          "41088b35-0dab-45cd-86cf-ede6e68ff318",
+          projectServiceTokenService.projectId,
           {
             name: "zomato-chat-live-token",
-            environment_id: "9ccb1c2a-d984-4865-9ee6-84050110c104",
+            environment_id: projectServiceTokenService.defaultEnvironmentId,
             capabilities: ["inference.execute", "models.read"],
           }
         );
@@ -396,10 +396,10 @@ describe("Zomato AI Demo — Project Service Token Integration & Lifecycle Verif
 
       // 1. Create token on live Cloud under Zomato project
       const created = await projectServiceTokenService.createToken(
-        "41088b35-0dab-45cd-86cf-ede6e68ff318",
+        projectServiceTokenService.projectId,
         {
           name: "e2e-live-verification-token",
-          environment_id: "9ccb1c2a-d984-4865-9ee6-84050110c104",
+          environment_id: projectServiceTokenService.defaultEnvironmentId,
           capabilities: ["models.read", "inference.execute"],
         }
       );
@@ -432,7 +432,7 @@ describe("Zomato AI Demo — Project Service Token Integration & Lifecycle Verif
 
       // 4. Test live rotation on Cloud
       const rotated = await projectServiceTokenService.rotateToken(
-        "41088b35-0dab-45cd-86cf-ede6e68ff318",
+        projectServiceTokenService.projectId,
         created.service_token.id,
         { grace_period_hours: 1 }
       );
@@ -451,7 +451,7 @@ describe("Zomato AI Demo — Project Service Token Integration & Lifecycle Verif
 
       // 5. Test live revocation on Cloud
       await projectServiceTokenService.revokeToken(
-        "41088b35-0dab-45cd-86cf-ede6e68ff318",
+        projectServiceTokenService.projectId,
         created.service_token.id,
         "cleanup test token"
       );
@@ -466,6 +466,98 @@ describe("Zomato AI Demo — Project Service Token Integration & Lifecycle Verif
       });
       assert.equal(postRevokeRes.status, "PASS");
       assert.equal(postRevokeRes.http_status, 401);
+    });
+  });
+
+  describe("8. B2B Partner Customer Member Provisioning via Service Token", () => {
+    let provisionedKeyId: string;
+    let provisionedRawKey: string;
+
+    it("should provision a new customer member and issue nm_live_ API key with budget using Master Service Token", async () => {
+      const result = await projectServiceTokenService.provisionCustomerToken({
+        name: "Kavita Krishnan",
+        email: "kavita.krishnan@example.com",
+        tier: "prime",
+        city: "Bengaluru",
+        phone: "+91-9876543299",
+        monthly_budget_usd: 30.0,
+        requests_per_minute: 60,
+        allowed_models: ["mock/gpt-5-mini", "gpt-4o"],
+      });
+
+      assert.ok(result.api_key, "Raw plaintext API key must be returned strictly once");
+      assert.ok(result.api_key.startsWith("nm_live_"), "Minted key must have nm_live_ prefix");
+      assert.ok(result.id, "Child API key ID must be present");
+      assert.ok(result.member_id, "Linked canonical Member ID must be present");
+      assert.equal(result.name, "Kavita Krishnan");
+      assert.equal(result.status, "active");
+      assert.equal(result.monthly_budget_usd, 30.0);
+      assert.equal(result.requests_per_minute, 60);
+      assert.ok(result.masked_identifier.includes("..."));
+
+      provisionedKeyId = result.id;
+      provisionedRawKey = result.api_key;
+    });
+
+    it("should allow inference using the newly provisioned child API key", async () => {
+      assert.ok(provisionedRawKey);
+      naagmaniClient.setAuthToken(provisionedRawKey);
+
+      const chatRes = await naagmaniClient.executeChat({
+        customerId: "cust_kavita",
+        messages: [{ role: "user", content: "Recommend 2 vegetarian pizzas" }],
+      });
+
+      assert.equal(chatRes.success, true);
+      assert.equal(chatRes.provider_called, true);
+      assert.ok(chatRes.usage && chatRes.usage.total_tokens > 0);
+    });
+
+    it("should retrieve real-time FinOps usage and remaining budget for the provisioned customer token", async () => {
+      assert.ok(provisionedKeyId);
+      const usage = await projectServiceTokenService.getCustomerTokenUsage(provisionedKeyId);
+
+      assert.equal(usage.token_id, provisionedKeyId);
+      assert.equal(usage.monthly_budget_usd, 30.0);
+      assert.ok(usage.remaining_budget_usd !== undefined);
+      assert.ok(usage.total_tokens >= 0);
+    });
+
+    it("should reject customer provisioning when caller lacks services.tokens.create capability", async () => {
+      // Create a restricted service token with only models.read
+      const readOnlyToken = await projectServiceTokenService.createToken(
+        projectServiceTokenService.projectId,
+        {
+          name: "restricted-reader-token",
+          environment_id: projectServiceTokenService.defaultEnvironmentId,
+          capabilities: ["models.read"],
+        },
+        { forceSandbox: true }
+      );
+
+      await assert.rejects(
+        async () => {
+          await projectServiceTokenService.provisionCustomerToken(
+            {
+              service_token: readOnlyToken.token,
+              name: "Unauthorized Customer Provisioning Attempt",
+            },
+            { forceSandbox: true }
+          );
+        },
+        /insufficient permissions|capability services\.tokens\.create/i
+      );
+    });
+
+    it("should revoke the provisioned customer token and reject subsequent access", async () => {
+      assert.ok(provisionedKeyId);
+      const revokeRes = await projectServiceTokenService.revokeCustomerToken(
+        provisionedKeyId,
+        "customer offboarding test"
+      );
+
+      assert.equal(revokeRes.success, true);
+      assert.equal(revokeRes.status, "revoked");
     });
   });
 });

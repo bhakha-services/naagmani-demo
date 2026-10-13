@@ -82,9 +82,9 @@ export class NaagmaniClient {
       osUrl: process.env.NAAGMANI_OS_URL || "http://localhost:8080",
       cloudUrl: process.env.NAAGMANI_CLOUD_URL || "http://localhost:8081",
       apiKey: process.env.NAAGMANI_API_KEY || "nm_live_0123456789abcdef0123456789abcdef0123456789abcdef",
-      orgId: process.env.NAAGMANI_ORG_ID || "00000000-0000-0000-0000-000000000001",
-      projectId: process.env.NAAGMANI_PROJECT_ID || "00000000-0000-0000-0000-000000000002",
-      environmentId: process.env.NAAGMANI_ENVIRONMENT_ID || "00000000-0000-0000-0000-000000000003",
+      orgId: process.env.NAAGMANI_ORG_ID || "org_eeded4e6-2532-446d-91fc-47691024229a",
+      projectId: process.env.NAAGMANI_PROJECT_ID || "f6e4f4c1-586d-48be-8bef-3fe8b03dd197",
+      environmentId: process.env.NAAGMANI_ENVIRONMENT_ID || "451c060c-84e2-4a3a-a0cd-cd3d18590f30",
       defaultModel: process.env.DEFAULT_MODEL || "mock/gpt-5-mini",
     };
   }

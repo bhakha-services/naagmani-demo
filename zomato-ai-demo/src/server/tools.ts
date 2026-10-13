@@ -1,4 +1,4 @@
-import { ORDERS, RESTAURANTS, CUSTOMERS, Order } from "../mock/data.js";
+import { ORDERS, RESTAURANTS, CUSTOMERS, Order } from "../mock/data";
 
 export interface ToolResult {
   tool: string;

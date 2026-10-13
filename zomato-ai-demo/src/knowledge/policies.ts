@@ -1,4 +1,6 @@
-import { SUPPORT_POLICIES, SupportPolicy } from "../mock/data.js";
+import { SUPPORT_POLICIES, type SupportPolicy } from "../mock/data";
+
+export { SUPPORT_POLICIES, type SupportPolicy };
 
 export interface RAGRetrievalResult {
   query: string;
