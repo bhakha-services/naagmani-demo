@@ -4,7 +4,7 @@
   "description": "Zomato-like AI Food Delivery Application powered by Naagmani v2 Enterprise AI OS",
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 3001",
+    "dev": "next dev -p 3002",
     "build": "next build",
     "start": "next start -p 3001",
     "test": "tsx --test tests/e2e/*.test.ts",
